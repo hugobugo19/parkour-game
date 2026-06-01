@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>跑酷躲避游戏 · 最终版</title>
+
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #111;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: Arial, sans-serif;
+}
+
+.game-wrapper {
+    position: relative;
+    width: 800px;
+    height: 900px;
+    border: 4px solid #00d4ff;
+    background: #000;
+    overflow: hidden;
+}
+
+#gameCanvas {
+    background: #87CEEB;
+    display: block;
+}
+
+/* ======================
+   ✅ UI 往下移
+   ====================== */
+.ui-layer {
+    position: absolute;
+    top: 60px;          /* ✅ 往下移 */
+    left: 12px;
+    color: #fff;
+    font-size: 18px;
+    z-index: 10;
+}
+
+select {
+    font-size: 16px;
+    padding: 4px;
+}
+
+.overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: #fff;
+    z-index: 20;
+}
+
+.hidden {
+    display: none;
+}
+
+button {
+    margin-top: 24px;
+    padding: 14px 48px;
+    font-size: 22px;
+    cursor: pointer;
+    border: none;
+    border-radius: 6px;
+    background: #00d4ff;
+    color: #000;
+}
+</style>
+</head>
+
+<body>
+
+<div class="game-wrapper">
+    <canvas id="gameCanvas" width="800" height="900"></canvas>
+
+    <div class="ui-layer">
+        分数：<span id="score">0</span><br>
+        最高分：<span id="highScore">0</span><br>
+        难度：
+        <select id="difficulty">
+            <option value="easy">简单</option>
+            <option value="normal" selected>普通</option>
+            <option value="hard">地狱</option>
+        </select>
+    </div>
+
+    <div class="overlay" id="startScreen">
+        <h1>🏃 跑酷躲避</h1>
+        <p>向上攀爬，躲避子弹</p>
+        <button onclick="startGame()">开始游戏</button>
+    </div>
+
+    <div class="overlay hidden" id="gameOverScreen">
+        <h2>游戏结束</h2>
+        <p>本次分数：<span id="finalScore">0</span></p>
+        <button onclick="restartGame()">重新开始</button>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+let gameRunning = false;
+let cameraY = 0;
+let cameraOffset = 0;
+let score = 0;
+let highScore = localStorage.getItem("highScore") || 0;
+
+let rafId = null;
+let bulletInterval = null;
+let dtMultiplier = 0.75;
+
+let frameCount = 0;
+const START_Y = 700;
+
+const player = {
+    x: 400,
+    y: START_Y,
+    w: 40,
+    h: 60,
+    vx: 0,
+    vy: 0,
+    speed: 3.2,
+    jumpPower: -16,
+    onGround: false,
+    jumpCount: 0,
+    maxJumps: 2
+};
+
+let platforms = [];
+let bullets = [];
+
+/* ======================
+   ✅ 岩浆层（每 3 秒向上增加）
+   ====================== */
+const lava = {
+    x: -1000,
+    y: 820 + 20,
+    w: 3000,
+    h: 100
+};
+
+let lavaTimer = 0;
+const lavaInterval = 3000;
+
+let cameraTimer = 0;
+const cameraInterval = 30000;
+const cameraMoveAmount = 50;
+
+const keys = {};
+document.addEventListener("keydown", e => keys[e.code] = true);
+document.addEventListener("keyup", e => keys[e.code] = false);
+
+function initPlatforms() {
+    platforms = [{
+        x: -100000,
+        y: 820,
+        w: 200000,
+        h: 80
+    }];
+
+    for (let y = START_Y; y > -600; y -= 70) {
+        platforms.push({
+            x: Math.random() * (800 - 120),
+            y,
+            w: 120 + Math.random() * 100,
+            h: 20
+        });
+    }
+}
+
+function getDifficultySettings() {
+    const d = document.getElementById("difficulty").value;
+    if (d === "easy") return { base: 2, burst: 3, interval: 10000 };
+    if (d === "hard") return { base: 5, burst: 5, interval: 7000 };
+    return { base: 3, burst: 3, interval: 10000 };
+}
+
+function getBulletSpeed() {
+    return getDifficultySettings().base;
+}
+
+function spawnBulletBurst() {
+    const { burst } = getDifficultySettings();
+    for (let i = 0; i < burst; i++) {
+        setTimeout(() => {
+            if (!gameRunning) return;
+            bullets.push({
+                x: Math.random() * (800 - 20),
+                y: cameraY + 920,
+                w: 20,
+                h: 20,
+                speed: getBulletSpeed()
+            });
+        }, i * 300);
+    }
+}
+
+function gameOver() {
+    gameRunning = false;
+
+    if (score > highScore) {
+        highScore = score;
+        localStorage.setItem("highScore", highScore);
+    }
+
+    document.getElementById("finalScore").textContent = score;
+    document.getElementById("highScore").textContent = highScore;
+    document.getElementById("gameOverScreen").classList.remove("hidden");
+
+    cancelAnimationFrame(rafId);
+    clearInterval(bulletInterval);
+}
+
+function update(dt) {
+    if (!gameRunning) return;
+
+    dt *= dtMultiplier;
+
+    if (frameCount % 30 === 0) {
+        const highestPlatformY = Math.min(...platforms.map(p => p.y));
+        const newY = highestPlatformY - (60 + Math.random() * 80);
+
+        platforms.push({
+            x: Math.random() * (800 - 120),
+            y: newY,
+            w: 120 + Math.random() * 100,
+            h: 20
+        });
+    }
+
+    cameraTimer += dt;
+    if (cameraTimer >= cameraInterval) {
+        cameraTimer = 0;
+        cameraOffset += cameraMoveAmount;
+    }
+
+    const targetCameraY = player.y - 450 - cameraOffset;
+    cameraY += Math.max((targetCameraY - cameraY) * 0.035, -8);
+
+    if (keys["KeyA"]) player.vx = -player.speed;
+    if (keys["KeyD"]) player.vx = player.speed;
+    if (!keys["KeyA"] && !keys["KeyD"]) player.vx = 0;
+
+    if (keys["Space"] &&
+        (player.onGround || player.jumpCount < player.maxJumps)) {
+        player.vy = player.jumpPower;
+        player.jumpCount++;
+        keys["Space"] = false;
+    }
+
+    player.x += player.vx;
+    if (player.x > 800) player.x = 0;
+    if (player.x + player.w < 0) player.x = 800 - player.w;
+
+    player.vy += 0.8;
+    if (player.vy > 12) player.vy = 12;
+    player.y += player.vy;
+
+    player.onGround = false;
+    platforms.forEach(p => {
+        if (
+            player.x < p.x + p.w &&
+            player.x + player.w > p.x &&
+            player.y + player.h > p.y &&
+            player.y + player.h - player.vy <= p.y
+        ) {
+            player.y = p.y - player.h;
+            player.vy = 0;
+            player.onGround = true;
+            player.jumpCount = 0;
+        }
+    });
+
+    lavaTimer += dt;
+    if (lavaTimer >= lavaInterval) {
+        lavaTimer = 0;
+        lava.y -= 20;
+        lava.h += 20;
+    }
+
+    if (
+        player.x < lava.x + lava.w &&
+        player.x + player.w > lava.x &&
+        player.y + player.h > lava.y &&
+        player.y < lava.y + lava.h
+    ) {
+        gameOver();
+    }
+
+    if (player.y > cameraY + 950) {
+        gameOver();
+    }
+
+    score = Math.floor((START_Y - player.y) / 20);
+    document.getElementById("score").textContent = score;
+    document.getElementById("highScore").textContent = highScore;
+
+    bullets.forEach((b, i) => {
+        b.y -= b.speed;
+        if (b.y < cameraY - 50) bullets.splice(i, 1);
+
+        if (
+            player.x < b.x + b.w &&
+            player.x + player.w > b.x &&
+            player.y < b.y + b.h &&
+            player.y + player.h > b.y
+        ) {
+            gameOver();
+        }
+    });
+}
+
+function draw() {
+    ctx.clearRect(0,0,800,900);
+    ctx.save();
+    ctx.translate(0, -cameraY);
+
+    platforms.forEach(p => {
+        ctx.fillStyle="#8B4513";
+        ctx.fillRect(p.x,p.y,p.w,p.h);
+    });
+
+    ctx.fillStyle="blue";
+    ctx.fillRect(player.x,player.y,player.w,player.h);
+
+    bullets.forEach(b => {
+        ctx.fillStyle="red";
+        ctx.beginPath();
+        ctx.arc(b.x+b.w/2, b.y+b.h/2, b.w/2, 0, Math.PI*2);
+        ctx.fill();
+    });
+
+    ctx.fillStyle = "orange";
+    ctx.fillRect(lava.x, lava.y, lava.w, lava.h);
+
+    ctx.restore();
+}
+
+function startGame() {
+    document.getElementById("startScreen").classList.add("hidden");
+    document.getElementById("gameOverScreen").classList.add("hidden");
+
+    score = 0;
+    cameraY = 0;
+    cameraOffset = 0;
+    frameCount = 0;
+    lavaTimer = 0;
+
+    bullets = [];
+    player.y = START_Y;
+    player.vy = 0;
+    player.jumpCount = 0;
+
+    lava.y = 820 + 20;
+    lava.h = 100;
+
+    dtMultiplier = 0.75;
+    initPlatforms();
+
+    gameRunning = true;
+    rafId = requestAnimationFrame(loop);
+
+    const { interval } = getDifficultySettings();
+    bulletInterval = setInterval(() => {
+        if (gameRunning) spawnBulletBurst();
+    }, interval);
+}
+
+function restartGame() {
+    startGame();
+}
+
+let lastT = 0;
+function loop(t) {
+    const dt = t - lastT;
+    lastT = t;
+    frameCount++;
+    update(dt);
+    draw();
+    rafId = requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
